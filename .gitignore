@@ -1,0 +1,5 @@
+.venv/
+__pycache__/
+*.py[cod]
+sample_exams/
+final_marks.xlsx
