@@ -230,7 +230,19 @@ def score_from_red_line(
     candidates = score_candidates(score_text)
 
     # Tesseract can drop the first digit of a handwritten two-digit mark.
-    # Retry only on a one-digit result to avoid extra OCR work on normal scans.
+    # Retry a thresholded crop before accepting a one-digit result.
+    if not any(len(candidate) > 1 for candidate in candidates):
+        thresholded = cv2.threshold(
+            selected_gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+        )[1]
+        thresholded_image = cv2.copyMakeBorder(
+            thresholded, 20, 20, 20, 20, cv2.BORDER_CONSTANT, value=255
+        )
+        thresholded_text = run_tesseract(
+            thresholded_image, executable, "--psm", "8", *config
+        )
+        candidates.extend(score_candidates(thresholded_text))
+
     if not any(len(candidate) > 1 for candidate in candidates):
         retry_text = run_tesseract(ocr_image, executable, "--psm", "13", *config)
         candidates.extend(score_candidates(retry_text))
