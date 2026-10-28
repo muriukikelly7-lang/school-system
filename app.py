@@ -225,7 +225,7 @@ def score_from_red_line(
             ocr_image, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC
         )
 
-    config = ("-c", "tessedit_char_whitelist=0123456789/")
+    config = ("-c", "tessedit_char_whitelist=0123456789")
     score_text = run_tesseract(ocr_image, executable, "--psm", "8", *config)
     candidates = score_candidates(score_text)
 
@@ -278,11 +278,6 @@ def extract_score(
     red_mask = extract_red_mask(prepared)
     if cv2.countNonZero(red_mask) == 0:
         return None
-    red_mask = cv2.dilate(
-        red_mask,
-        np.ones((3, 3), dtype=np.uint8),
-        iterations=1,
-    )
 
     score_label = find_score_label(page_words or []) if page_words is not None else None
     if score_label is not None:
