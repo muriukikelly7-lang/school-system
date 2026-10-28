@@ -278,6 +278,11 @@ def extract_score(
     red_mask = extract_red_mask(prepared)
     if cv2.countNonZero(red_mask) == 0:
         return None
+    red_mask = cv2.dilate(
+        red_mask,
+        np.ones((3, 3), dtype=np.uint8),
+        iterations=1,
+    )
 
     score_label = find_score_label(page_words or []) if page_words is not None else None
     if score_label is not None:
