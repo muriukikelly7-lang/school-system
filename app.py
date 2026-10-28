@@ -159,7 +159,7 @@ def extract_admission_number(
 
     text = " ".join(word["text"] for word in page_words)
     matches = re.finditer(
-        r"\bADM[\s:.-]*([0-9OQIL|]{3})\b", text, re.IGNORECASE
+        r"\bADM[\s:.-]*([0-9OQIL|]{3})(?!\d)", text, re.IGNORECASE
     )
     for match in matches:
         digits = normalize_ocr_digits(match.group(1))
@@ -213,14 +213,11 @@ def score_from_red_line(
     grayscale: np.ndarray,
     executable: str,
 ) -> int | None:
-    """OCR one horizontal line of red ink and return a plausible score."""
+    """OCR one horizontal line of red ink, retrying ambiguous one-digit reads."""
     x, y, width, height = cv2.boundingRect(red_mask)
-    selected_mask = red_mask[y : y + height, x : x + width]
     selected_gray = grayscale[y : y + height, x : x + width]
-    ocr_image = np.full_like(selected_gray, 255)
-    ocr_image[selected_mask > 0] = selected_gray[selected_mask > 0]
     ocr_image = cv2.copyMakeBorder(
-        ocr_image, 20, 20, 20, 20, cv2.BORDER_CONSTANT, value=255
+        selected_gray, 30, 30, 30, 30, cv2.BORDER_CONSTANT, value=255
     )
     if height < 100:
         scale = min(3.0, 100 / height)
@@ -228,25 +225,30 @@ def score_from_red_line(
             ocr_image, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC
         )
 
-    score_text = run_tesseract(
-        ocr_image,
-        executable,
-        "--psm",
-        "8",
-        "-c",
-        "tessedit_char_whitelist=0123456789/",
-    )
-    fraction = re.search(r"(?<!\d)(\d{1,3})\s*/\s*\d{1,3}(?!\d)", score_text)
-    candidates = (
-        [fraction.group(1)]
-        if fraction
-        else re.findall(r"(?<!\d)\d{1,3}(?!\d)", score_text)
-    )
-    for candidate in candidates:
-        score = int(candidate)
-        if 0 <= score <= 100:
-            return score
-    return None
+    config = ("-c", "tessedit_char_whitelist=0123456789/")
+    score_text = run_tesseract(ocr_image, executable, "--psm", "8", *config)
+    candidates = score_candidates(score_text)
+
+    # Tesseract can drop the first digit of a handwritten two-digit mark.
+    # Retry only on a one-digit result to avoid extra OCR work on normal scans.
+    if not any(len(candidate) > 1 for candidate in candidates):
+        retry_text = run_tesseract(ocr_image, executable, "--psm", "13", *config)
+        candidates.extend(score_candidates(retry_text))
+
+    valid_scores = [
+        int(candidate)
+        for candidate in candidates
+        if candidate.isdigit() and 0 <= int(candidate) <= 100
+    ]
+    return max(valid_scores, key=lambda score: len(str(score))) if valid_scores else None
+
+
+def score_candidates(text: str) -> list[str]:
+    """Extract score tokens, preferring the numerator when OCR sees a fraction."""
+    fraction = re.search(r"(?<!\d)(\d{1,3})\s*/\s*\d{1,3}(?!\d)", text)
+    if fraction:
+        return [fraction.group(1)]
+    return re.findall(r"(?<!\d)\d{1,3}(?!\d)", text)
 
 
 def first_red_line(
