@@ -21,7 +21,7 @@ STUDENTS_CSV = BASE_DIR / "students_db.csv"
 MAX_IMAGE_SIZE_BYTES = 20 * 1024 * 1024
 MAX_OCR_DIMENSION = 2400
 MAX_OCR_UPSCALE = 2.5
-OCR_BUILD = "handwritten-score-v3"
+OCR_BUILD = "handwritten-score-v4"
 SAMPLE_STUDENTS = [
     {"Admission_No": "ADM-101", "Student_Name": "John Doe", "Class": "Form 3"},
     {"Admission_No": "ADM-102", "Student_Name": "Jane Smith", "Class": "Form 3"},
@@ -259,16 +259,21 @@ def score_from_red_line(
         if candidate.isdigit() and 0 <= int(candidate) <= 100
     ]
     if valid_scores and max(len(str(score)) for score in valid_scores) == 1:
-        inferred_score = infer_score_with_leading_eight(red_mask, valid_scores)
-        if inferred_score is not None:
-            return inferred_score
+        recovered_score = recover_split_score(
+            red_mask, grayscale, executable, valid_scores
+        )
+        if recovered_score is not None:
+            return recovered_score
     return max(valid_scores, key=lambda score: len(str(score))) if valid_scores else None
 
 
-def infer_score_with_leading_eight(
-    red_mask: np.ndarray, single_digit_scores: list[int]
+def recover_split_score(
+    red_mask: np.ndarray,
+    grayscale: np.ndarray,
+    executable: str,
+    single_digit_scores: list[int],
 ) -> int | None:
-    """Recover a missed leading 8 when its two loops identify a separate first digit."""
+    """Recover a missed first digit when OCR independently confirms both red digits."""
     if not single_digit_scores or len(set(single_digit_scores)) != 1:
         return None
 
@@ -286,34 +291,48 @@ def infer_score_with_leading_eight(
         return None
 
     _, first_x, first_y, first_width, first_height, _ = components[0]
-    _, second_x, _, _, second_height, _ = components[1]
+    _, second_x, second_y, second_width, second_height, _ = components[1]
     if (
         first_x + first_width < second_x - 5
         or min(first_height, second_height) / max(first_height, second_height) < 0.65
     ):
         return None
 
-    first_digit = np.where(
-        labels[first_y : first_y + first_height, first_x : first_x + first_width]
-        == components[0][0],
-        255,
-        0,
-    ).astype(np.uint8)
-    contours, hierarchy = cv2.findContours(
-        first_digit, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE
-    )
-    if hierarchy is None or not contours:
-        return None
-    outer_contour = max(
-        range(len(contours)), key=lambda index: cv2.contourArea(contours[index])
-    )
-    enclosed_loops = sum(
-        1 for contour in hierarchy[0] if contour[3] == outer_contour
-    )
-    if enclosed_loops != 2:
+    recognized_digits: list[int] = []
+    for component_index, x, y, width, height, _ in components:
+        component_labels = labels[y : y + height, x : x + width]
+        component_gray = grayscale[y : y + height, x : x + width]
+        selected_gray = np.where(
+            component_labels == component_index, component_gray, 255
+        )
+        ocr_image = cv2.copyMakeBorder(
+            selected_gray, 10, 10, 10, 10, cv2.BORDER_CONSTANT, value=255
+        )
+        if height < 100:
+            scale = min(3.0, 100 / height)
+            ocr_image = cv2.resize(
+                ocr_image, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC
+            )
+        text = run_tesseract(
+            ocr_image,
+            executable,
+            "--psm",
+            "8",
+            "-c",
+            "tessedit_char_whitelist=0123456789",
+        )
+        candidates = score_candidates(text)
+        if not candidates or not candidates[0].isdigit() or len(candidates[0]) != 1:
+            return None
+        recognized_digits.append(int(candidates[0]))
+
+    if (
+        recognized_digits[1] != single_digit_scores[0]
+        or not 1 <= recognized_digits[0] <= 9
+    ):
         return None
 
-    inferred_score = 80 + single_digit_scores[0]
+    inferred_score = recognized_digits[0] * 10 + recognized_digits[1]
     return inferred_score if inferred_score <= 100 else None
 
 
