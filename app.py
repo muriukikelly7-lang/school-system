@@ -217,7 +217,7 @@ def score_from_red_line(
     x, y, width, height = cv2.boundingRect(red_mask)
     selected_gray = grayscale[y : y + height, x : x + width]
     ocr_image = cv2.copyMakeBorder(
-        selected_gray, 30, 30, 30, 30, cv2.BORDER_CONSTANT, value=255
+        selected_gray, 40, 40, 40, 40, cv2.BORDER_CONSTANT, value=255
     )
     if height < 100:
         scale = min(3.0, 100 / height)
