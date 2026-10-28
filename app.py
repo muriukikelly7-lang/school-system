@@ -21,11 +21,12 @@ STUDENTS_CSV = BASE_DIR / "students_db.csv"
 MAX_IMAGE_SIZE_BYTES = 20 * 1024 * 1024
 MAX_OCR_DIMENSION = 2400
 MAX_OCR_UPSCALE = 2.5
-OCR_BUILD = "handwritten-score-v4"
+OCR_BUILD = "handwritten-score-v5"
 SAMPLE_STUDENTS = [
     {"Admission_No": "ADM-101", "Student_Name": "John Doe", "Class": "Form 3"},
-    {"Admission_No": "ADM-102", "Student_Name": "Jane Smith", "Class": "Form 3"},
-    {"Admission_No": "ADM-103", "Student_Name": "Alex Otieno", "Class": "Form 3"},
+    {"Admission_No": "ADM-102", "Student_Name": "Jane Smith", "Class": "Form 3 West"},
+    {"Admission_No": "ADM-103", "Student_Name": "Alex Otieno", "Class": "Form 3 North"},
+    {"Admission_No": "ADM-104", "Student_Name": "Mary Wanjiku", "Class": "Form 3 South"},
 ]
 
 
@@ -214,50 +215,72 @@ def score_from_red_line(
     grayscale: np.ndarray,
     executable: str,
 ) -> int | None:
-    """OCR one horizontal line of red ink, retrying ambiguous one-digit reads."""
+    """OCR one horizontal score line with padded, upscaled digit-only retries."""
     x, y, width, height = cv2.boundingRect(red_mask)
-    selected_gray = grayscale[y : y + height, x : x + width]
-    ocr_image = cv2.copyMakeBorder(
-        selected_gray, 40, 40, 40, 40, cv2.BORDER_CONSTANT, value=255
+    horizontal_padding = max(10, height // 3)
+    vertical_padding = max(4, height // 12)
+    x0 = max(0, x - horizontal_padding)
+    x1 = min(grayscale.shape[1], x + width + horizontal_padding)
+    y0 = max(0, y - vertical_padding)
+    y1 = min(grayscale.shape[0], y + height + vertical_padding)
+    selected_gray = grayscale[y0:y1, x0:x1]
+    selected_mask = red_mask[y0:y1, x0:x1]
+    enhanced_mask = cv2.morphologyEx(
+        selected_mask,
+        cv2.MORPH_CLOSE,
+        np.ones((3, 3), dtype=np.uint8),
     )
-    if height < 100:
-        scale = min(3.0, 100 / height)
-        ocr_image = cv2.resize(
-            ocr_image, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC
-        )
-
+    enhanced_mask = cv2.dilate(
+        enhanced_mask, np.ones((2, 2), dtype=np.uint8), iterations=1
+    )
+    padded_gray = cv2.copyMakeBorder(
+        selected_gray, 20, 20, 20, 20, cv2.BORDER_CONSTANT, value=255
+    )
+    ocr_image = cv2.resize(
+        padded_gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC
+    )
     config = ("-c", "tessedit_char_whitelist=0123456789")
-    score_text = run_tesseract(ocr_image, executable, "--psm", "8", *config)
-    candidates = score_candidates(score_text)
+    score_text = run_tesseract(ocr_image, executable, "--psm", "7", *config)
+    primary_candidates = score_candidates(score_text)
+    candidates = list(primary_candidates)
 
-    # Tesseract can drop the first digit of a handwritten two-digit mark.
-    # Retry a thresholded crop before accepting a one-digit result.
-    if not any(len(candidate) > 1 for candidate in candidates):
-        thresholded = cv2.threshold(
-            selected_gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
-        )[1]
-        thresholded_image = cv2.copyMakeBorder(
-            thresholded, 20, 20, 20, 20, cv2.BORDER_CONSTANT, value=255
+    red_only = np.where(enhanced_mask > 0, selected_gray, 255).astype(np.uint8)
+    thresholded = cv2.threshold(
+        red_only, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+    )[1]
+    thresholded_image = cv2.copyMakeBorder(
+        thresholded, 20, 20, 20, 20, cv2.BORDER_CONSTANT, value=255
+    )
+    thresholded_image = cv2.resize(
+        thresholded_image,
+        None,
+        fx=2.0,
+        fy=2.0,
+        interpolation=cv2.INTER_CUBIC,
+    )
+    alternate_candidates = []
+    for psm in ("8", "13"):
+        retry_text = run_tesseract(
+            thresholded_image, executable, "--psm", psm, *config
         )
-        thresholded_text = run_tesseract(
-            thresholded_image, executable, "--psm", "8", *config
-        )
-        candidates.extend(score_candidates(thresholded_text))
-        if not any(len(candidate) > 1 for candidate in candidates):
-            thresholded_retry_text = run_tesseract(
-                thresholded_image, executable, "--psm", "13", *config
-            )
-            candidates.extend(score_candidates(thresholded_retry_text))
+        retry_candidates = score_candidates(retry_text)
+        alternate_candidates.append(retry_candidates)
+        candidates.extend(retry_candidates)
 
-    if not any(len(candidate) > 1 for candidate in candidates):
-        retry_text = run_tesseract(ocr_image, executable, "--psm", "13", *config)
-        candidates.extend(score_candidates(retry_text))
-
-    valid_scores = [
-        int(candidate)
-        for candidate in candidates
-        if candidate.isdigit() and 0 <= int(candidate) <= 100
+    alternate_score_sets = [
+        {
+            score
+            for score in valid_score_values(retry_candidates)
+            if len(str(score)) == 2
+        }
+        for retry_candidates in alternate_candidates
     ]
+    confirmed_scores = alternate_score_sets[0].intersection(alternate_score_sets[1])
+    if confirmed_scores:
+        return max(confirmed_scores)
+
+    valid_scores = valid_score_values(candidates)
+
     if valid_scores and max(len(str(score)) for score in valid_scores) == 1:
         recovered_score = recover_split_score(
             red_mask, grayscale, executable, valid_scores
@@ -265,6 +288,24 @@ def score_from_red_line(
         if recovered_score is not None:
             return recovered_score
     return max(valid_scores, key=lambda score: len(str(score))) if valid_scores else None
+
+
+def valid_score_values(candidates: list[str]) -> list[int]:
+    """Return parsed scores in the supported 0-100 range."""
+    valid_scores = [
+        int(candidate)
+        for candidate in candidates
+        if candidate.isdigit() and 0 <= int(candidate) <= 100
+    ]
+    if valid_scores:
+        return valid_scores
+
+    for candidate in candidates:
+        if len(candidate) > 2 and candidate[-2:].isdigit():
+            trailing_score = int(candidate[-2:])
+            if 0 <= trailing_score <= 100:
+                return [trailing_score]
+    return []
 
 
 def recover_split_score(
@@ -341,7 +382,7 @@ def score_candidates(text: str) -> list[str]:
     fraction = re.search(r"(?<!\d)(\d{1,3})\s*/\s*\d{1,3}(?!\d)", text)
     if fraction:
         return [fraction.group(1)]
-    return re.findall(r"(?<!\d)\d{1,3}(?!\d)", text)
+    return re.findall(r"(?<!\d)\d+(?!\d)", text)
 
 
 def first_red_line(
