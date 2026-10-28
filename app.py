@@ -242,6 +242,11 @@ def score_from_red_line(
             thresholded_image, executable, "--psm", "8", *config
         )
         candidates.extend(score_candidates(thresholded_text))
+        if not any(len(candidate) > 1 for candidate in candidates):
+            thresholded_retry_text = run_tesseract(
+                thresholded_image, executable, "--psm", "13", *config
+            )
+            candidates.extend(score_candidates(thresholded_retry_text))
 
     if not any(len(candidate) > 1 for candidate in candidates):
         retry_text = run_tesseract(ocr_image, executable, "--psm", "13", *config)
