@@ -21,6 +21,7 @@ STUDENTS_CSV = BASE_DIR / "students_db.csv"
 MAX_IMAGE_SIZE_BYTES = 20 * 1024 * 1024
 MAX_OCR_DIMENSION = 2400
 MAX_OCR_UPSCALE = 2.5
+OCR_BUILD = "handwritten-score-v3"
 SAMPLE_STUDENTS = [
     {"Admission_No": "ADM-101", "Student_Name": "John Doe", "Class": "Form 3"},
     {"Admission_No": "ADM-102", "Student_Name": "Jane Smith", "Class": "Form 3"},
@@ -257,7 +258,63 @@ def score_from_red_line(
         for candidate in candidates
         if candidate.isdigit() and 0 <= int(candidate) <= 100
     ]
+    if valid_scores and max(len(str(score)) for score in valid_scores) == 1:
+        inferred_score = infer_score_with_leading_eight(red_mask, valid_scores)
+        if inferred_score is not None:
+            return inferred_score
     return max(valid_scores, key=lambda score: len(str(score))) if valid_scores else None
+
+
+def infer_score_with_leading_eight(
+    red_mask: np.ndarray, single_digit_scores: list[int]
+) -> int | None:
+    """Recover a missed leading 8 when its two loops identify a separate first digit."""
+    if not single_digit_scores or len(set(single_digit_scores)) != 1:
+        return None
+
+    component_count, labels, stats, _ = cv2.connectedComponentsWithStats(red_mask)
+    minimum_area = max(20, cv2.countNonZero(red_mask) // 12)
+    components = sorted(
+        (
+            (index, *map(int, stats[index]))
+            for index in range(1, component_count)
+            if stats[index, cv2.CC_STAT_AREA] >= minimum_area
+        ),
+        key=lambda component: component[1],
+    )
+    if len(components) != 2:
+        return None
+
+    _, first_x, first_y, first_width, first_height, _ = components[0]
+    _, second_x, _, _, second_height, _ = components[1]
+    if (
+        first_x + first_width < second_x - 5
+        or min(first_height, second_height) / max(first_height, second_height) < 0.65
+    ):
+        return None
+
+    first_digit = np.where(
+        labels[first_y : first_y + first_height, first_x : first_x + first_width]
+        == components[0][0],
+        255,
+        0,
+    ).astype(np.uint8)
+    contours, hierarchy = cv2.findContours(
+        first_digit, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE
+    )
+    if hierarchy is None or not contours:
+        return None
+    outer_contour = max(
+        range(len(contours)), key=lambda index: cv2.contourArea(contours[index])
+    )
+    enclosed_loops = sum(
+        1 for contour in hierarchy[0] if contour[3] == outer_contour
+    )
+    if enclosed_loops != 2:
+        return None
+
+    inferred_score = 80 + single_digit_scores[0]
+    return inferred_score if inferred_score <= 100 else None
 
 
 def score_candidates(text: str) -> list[str]:
@@ -407,6 +464,7 @@ def scan_exam(
 def main() -> None:
     st.set_page_config(page_title="School Exam Scanner MVP", page_icon="📚")
     st.title("📚 School Exam Scanner MVP")
+    st.caption(f"OCR build: {OCR_BUILD}")
     st.write(
         "Upload an exam cover page or take a photo. The app reads the admission "
         "number and isolates red-ink marks using local OCR."
