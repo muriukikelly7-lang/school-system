@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+from collections import Counter
 from io import BytesIO
 import re
 import shutil
@@ -21,7 +22,7 @@ STUDENTS_CSV = BASE_DIR / "students_db.csv"
 MAX_IMAGE_SIZE_BYTES = 20 * 1024 * 1024
 MAX_OCR_DIMENSION = 2400
 MAX_OCR_UPSCALE = 2.5
-OCR_BUILD = "handwritten-score-v5"
+OCR_BUILD = "handwritten-score-v6"
 SAMPLE_STUDENTS = [
     {"Admission_No": "ADM-101", "Student_Name": "John Doe", "Class": "Form 3"},
     {"Admission_No": "ADM-102", "Student_Name": "Jane Smith", "Class": "Form 3 West"},
@@ -241,8 +242,7 @@ def score_from_red_line(
     )
     config = ("-c", "tessedit_char_whitelist=0123456789")
     score_text = run_tesseract(ocr_image, executable, "--psm", "7", *config)
-    primary_candidates = score_candidates(score_text)
-    candidates = list(primary_candidates)
+    attempts = [valid_score_values(score_candidates(score_text))]
 
     red_only = np.where(enhanced_mask > 0, selected_gray, 255).astype(np.uint8)
     thresholded = cv2.threshold(
@@ -258,54 +258,69 @@ def score_from_red_line(
         fy=2.0,
         interpolation=cv2.INTER_CUBIC,
     )
-    alternate_candidates = []
     for psm in ("8", "13"):
         retry_text = run_tesseract(
             thresholded_image, executable, "--psm", psm, *config
         )
-        retry_candidates = score_candidates(retry_text)
-        alternate_candidates.append(retry_candidates)
-        candidates.extend(retry_candidates)
+        attempts.append(valid_score_values(score_candidates(retry_text)))
 
-    alternate_score_sets = [
-        {
-            score
-            for score in valid_score_values(retry_candidates)
-            if len(str(score)) == 2
-        }
-        for retry_candidates in alternate_candidates
+    two_digit_votes = Counter(
+        score
+        for attempt in attempts
+        for score in set(attempt)
+        if 10 <= score <= 100
+    )
+    confirmed_two_digit_scores = [
+        score for score, votes in two_digit_votes.items() if votes >= 2
     ]
-    confirmed_scores = alternate_score_sets[0].intersection(alternate_score_sets[1])
-    if confirmed_scores:
-        return max(confirmed_scores)
+    if len(confirmed_two_digit_scores) == 1:
+        return confirmed_two_digit_scores[0]
+    if len(confirmed_two_digit_scores) > 1:
+        return None
+    has_unconfirmed_two_digit_reading = any(two_digit_votes.values())
 
-    valid_scores = valid_score_values(candidates)
-
-    if valid_scores and max(len(str(score)) for score in valid_scores) == 1:
+    single_digit_votes = Counter(
+        score
+        for attempt in attempts
+        for score in set(attempt)
+        if 0 <= score <= 9
+    )
+    confirmed_single_digits = [
+        score for score, votes in single_digit_votes.items() if votes >= 2
+    ]
+    if len(confirmed_single_digits) == 1:
         recovered_score = recover_split_score(
-            red_mask, grayscale, executable, valid_scores
+            red_mask, grayscale, executable, [confirmed_single_digits[0]]
         )
         if recovered_score is not None:
             return recovered_score
-    return max(valid_scores, key=lambda score: len(str(score))) if valid_scores else None
+        if has_unconfirmed_two_digit_reading:
+            return None
+        component_count, _, component_stats, _ = cv2.connectedComponentsWithStats(
+            red_mask
+        )
+        minimum_area = max(20, cv2.countNonZero(red_mask) // 12)
+        significant_components = sum(
+            1
+            for index in range(1, component_count)
+            if component_stats[index, cv2.CC_STAT_AREA] >= minimum_area
+        )
+        if significant_components > 1:
+            return None
+        return confirmed_single_digits[0]
+    if len(confirmed_single_digits) > 1:
+        return None
+
+    return None
 
 
 def valid_score_values(candidates: list[str]) -> list[int]:
     """Return parsed scores in the supported 0-100 range."""
-    valid_scores = [
+    return [
         int(candidate)
         for candidate in candidates
         if candidate.isdigit() and 0 <= int(candidate) <= 100
     ]
-    if valid_scores:
-        return valid_scores
-
-    for candidate in candidates:
-        if len(candidate) > 2 and candidate[-2:].isdigit():
-            trailing_score = int(candidate[-2:])
-            if 0 <= trailing_score <= 100:
-                return [trailing_score]
-    return []
 
 
 def recover_split_score(
@@ -592,7 +607,9 @@ def main() -> None:
     elif result["Student Name"] == "Unknown Student":
         st.warning("Admission number was not found in students_db.csv.")
     if result["Score"] is None:
-        st.warning("No red-ink score was detected. Review the image and try again.")
+        st.warning(
+            "No reliable score was confirmed. Review the handwritten mark and try again."
+        )
     elif result["Class"]:
         st.caption(f"Class: {result['Class']}")
 
