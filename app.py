@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 from collections import Counter
+import hashlib
 from io import BytesIO
 import re
 import shutil
@@ -22,7 +23,7 @@ STUDENTS_CSV = BASE_DIR / "students_db.csv"
 MAX_IMAGE_SIZE_BYTES = 20 * 1024 * 1024
 MAX_OCR_DIMENSION = 2400
 MAX_OCR_UPSCALE = 2.5
-OCR_BUILD = "handwritten-score-v6"
+OCR_BUILD = "handwritten-score-v7"
 SAMPLE_STUDENTS = [
     {"Admission_No": "ADM-101", "Student_Name": "John Doe", "Class": "Form 3"},
     {"Admission_No": "ADM-102", "Student_Name": "Jane Smith", "Class": "Form 3 West"},
@@ -536,6 +537,53 @@ def scan_exam(
     }
 
 
+def display_scan_result(
+    result: dict[str, str | int | None], image_digest: str
+) -> None:
+    """Display OCR output and a teacher-editable score preview."""
+    st.subheader("Scan result")
+    admission_col, name_col, score_col, grade_col = st.columns(4)
+    admission_col.metric("Admission Number", result["Admission Number"])
+    name_col.metric("Student Name", result["Student Name"])
+    score_col.metric(
+        "OCR score",
+        result["Score"] if result["Score"] is not None else "Needs review",
+    )
+    grade_col.metric("OCR grade", result["Grade"])
+
+    if result["Admission Number"] == "Not detected":
+        st.warning("Admission number was not detected. Check the image and try again.")
+    elif result["Student Name"] == "Unknown Student":
+        st.warning("Admission number was not found in students_db.csv.")
+    if result["Score"] is None:
+        st.warning(
+            "No reliable score was confirmed. Review the handwritten mark and enter it below."
+        )
+
+    review_key = f"score-review-{image_digest}"
+    if review_key not in st.session_state:
+        st.session_state[review_key] = (
+            str(result["Score"]) if result["Score"] is not None else ""
+        )
+    review_value = st.text_input(
+        "Confirm or correct the score (0-100)",
+        key=review_key,
+        max_chars=3,
+    )
+    if review_value:
+        if not review_value.isdigit() or not 0 <= int(review_value) <= 100:
+            st.error("Enter a whole-number score from 0 to 100.")
+        else:
+            confirmed_score = int(review_value)
+            st.success(
+                f"Review preview: {confirmed_score} — "
+                f"grade {grade_for_score(confirmed_score)}"
+            )
+    st.caption("Review only: this scanner prototype does not save marks or export Excel.")
+    if result["Class"]:
+        st.caption(f"Class: {result['Class']}")
+
+
 def main() -> None:
     st.set_page_config(page_title="School Exam Scanner MVP", page_icon="📚")
     st.title("📚 School Exam Scanner MVP")
@@ -573,45 +621,33 @@ def main() -> None:
         st.error("Image is too large. Please use an image smaller than 20 MB.")
         return
 
+    image_digest = hashlib.sha256(image_bytes).hexdigest()
     st.image(image_bytes, caption="Exam cover to scan", use_container_width=True)
-    if not st.button("Scan exam cover", type="primary"):
-        return
+    if st.button("Scan exam cover", type="primary"):
+        try:
+            result = scan_exam(image_bytes, students)
+        except FileNotFoundError as error:
+            st.error(str(error))
+            return
+        except subprocess.TimeoutExpired:
+            st.error("Tesseract OCR took too long. Try a smaller or clearer image.")
+            return
+        except subprocess.CalledProcessError as error:
+            details = error.stderr.strip() if error.stderr else "No Tesseract error details."
+            st.error(f"Tesseract OCR failed: {details}")
+            return
+        except (OSError, ValueError, RuntimeError) as error:
+            st.error(f"Could not process this image: {error}")
+            return
+        st.session_state["latest_scan_result"] = result
+        st.session_state["latest_scan_digest"] = image_digest
 
-    try:
-        result = scan_exam(image_bytes, students)
-    except FileNotFoundError as error:
-        st.error(str(error))
-        return
-    except subprocess.TimeoutExpired:
-        st.error("Tesseract OCR took too long. Try a smaller or clearer image.")
-        return
-    except subprocess.CalledProcessError as error:
-        details = error.stderr.strip() if error.stderr else "No Tesseract error details."
-        st.error(f"Tesseract OCR failed: {details}")
-        return
-    except (OSError, ValueError, RuntimeError) as error:
-        st.error(f"Could not process this image: {error}")
-        return
-
-    st.subheader("Scan result")
-    admission_col, name_col, score_col, grade_col = st.columns(4)
-    admission_col.metric("Admission Number", result["Admission Number"])
-    name_col.metric("Student Name", result["Student Name"])
-    score_col.metric(
-        "Extracted Score",
-        result["Score"] if result["Score"] is not None else "Not detected",
-    )
-    grade_col.metric("Assigned Grade", result["Grade"])
-    if result["Admission Number"] == "Not detected":
-        st.warning("Admission number was not detected. Check the image and try again.")
-    elif result["Student Name"] == "Unknown Student":
-        st.warning("Admission number was not found in students_db.csv.")
-    if result["Score"] is None:
-        st.warning(
-            "No reliable score was confirmed. Review the handwritten mark and try again."
-        )
-    elif result["Class"]:
-        st.caption(f"Class: {result['Class']}")
+    result = st.session_state.get("latest_scan_result")
+    if (
+        isinstance(result, dict)
+        and st.session_state.get("latest_scan_digest") == image_digest
+    ):
+        display_scan_result(result, image_digest)
 
 
 if __name__ == "__main__":
