@@ -25,7 +25,7 @@ MAX_OCR_DIMENSION = 2400
 MAX_OCR_UPSCALE = 2.5
 OCR_BUILD = "handwritten-score-v7"
 SAMPLE_STUDENTS = [
-    {"Admission_No": "ADM-101", "Student_Name": "John Doe", "Class": "Form 3"},
+    {"Admission_No": "ADM-101", "Student_Name": "John Doe", "Class": "Form 3 East"},
     {"Admission_No": "ADM-102", "Student_Name": "Jane Smith", "Class": "Form 3 West"},
     {"Admission_No": "ADM-103", "Student_Name": "Alex Otieno", "Class": "Form 3 North"},
     {"Admission_No": "ADM-104", "Student_Name": "Mary Wanjiku", "Class": "Form 3 South"},
@@ -75,14 +75,18 @@ def normalize_admission_number(value: str) -> str | None:
 
 
 def find_tesseract() -> str:
-    """Find Tesseract on PATH or in its standard Windows installation folder."""
+    """Find Tesseract on PATH or in the common Windows installation folders."""
     executable = shutil.which("tesseract")
     if executable:
         return executable
 
-    windows_executable = Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe")
-    if windows_executable.is_file():
-        return str(windows_executable)
+    for windows_base in (
+        Path(r"C:\Program Files\Tesseract-OCR"),
+        Path(r"C:\Program Files (x86)\Tesseract-OCR"),
+    ):
+        windows_executable = windows_base / "tesseract.exe"
+        if windows_executable.is_file():
+            return str(windows_executable)
 
     raise FileNotFoundError(
         "Tesseract OCR was not found. Streamlit Cloud installs it from "
@@ -113,16 +117,32 @@ def run_tesseract(image: np.ndarray, executable: str, *config: str) -> str:
 
 def decode_image(image_bytes: bytes) -> np.ndarray:
     """Decode uploaded/captured bytes as a correctly oriented OpenCV BGR image."""
-    with Image.open(BytesIO(image_bytes)) as source:
-        image = ImageOps.exif_transpose(source).convert("RGB")
-        rgb_image = np.asarray(image)
+    if not image_bytes:
+        raise ValueError("The uploaded image could not be decoded.")
+
+    try:
+        with Image.open(BytesIO(image_bytes)) as source:
+            image = ImageOps.exif_transpose(source).convert("RGB")
+            rgb_image = np.asarray(image)
+    except (OSError, ValueError) as exc:
+        raise ValueError("The uploaded image could not be decoded.") from exc
     return cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR)
 
 
 def prepare_ocr_image(image: np.ndarray) -> np.ndarray:
     """Resize the page to a useful OCR resolution without huge Tesseract inputs."""
+    if image.size == 0 or image.ndim < 2:
+        return image.copy()
+
     height, width = image.shape[:2]
-    scale = min(MAX_OCR_UPSCALE, MAX_OCR_DIMENSION / max(height, width))
+    if height == 0 or width == 0:
+        return image.copy()
+
+    max_dimension = max(height, width)
+    if max_dimension == 0:
+        return image.copy()
+
+    scale = min(MAX_OCR_UPSCALE, MAX_OCR_DIMENSION / max_dimension)
     if scale == 1:
         return image
     return cv2.resize(

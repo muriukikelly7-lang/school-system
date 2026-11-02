@@ -84,6 +84,28 @@ class ScoreOcrTests(unittest.TestCase):
         self.assertEqual(app.grade_for_score(80), "A")
         self.assertEqual(app.grade_for_score(100), "A")
 
+    def test_prepare_ocr_image_handles_empty_arrays(self) -> None:
+        empty = np.zeros((0, 0, 3), dtype=np.uint8)
+        prepared = app.prepare_ocr_image(empty)
+        self.assertEqual(prepared.shape, (0, 0, 3))
+
+    def test_decode_image_rejects_unreadable_bytes(self) -> None:
+        with self.assertRaisesRegex(ValueError, "decoded"):
+            app.decode_image(b"not-a-real-image")
+
+    def test_find_tesseract_checks_32_bit_windows_install(self) -> None:
+        with patch("app.shutil.which", return_value=None), patch.object(
+            app.Path,
+            "is_file",
+            autospec=True,
+            side_effect=lambda path: str(path)
+            == r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+        ):
+            self.assertEqual(
+                app.find_tesseract(),
+                r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
